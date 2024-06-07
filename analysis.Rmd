@@ -1,0 +1,615 @@
+---
+title: "Manhattan Real Estate Analysis"
+author: "Hansen Han"
+date: "2024-03-08"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+## Load Packages
+
+```{r errors=FALSE, messages=FALSE}
+library(tidyverse)
+library(magrittr)
+library(ggpubr)
+library(FinancialMath)
+library(ggsignif)
+```
+
+## Loading Data & Pre-Processing
+
+Neighborhood - Zipcode Matching Data: We'll need this to assign each property to a neighborhood
+
+```{r}
+neighborhood_data <- read_csv("data/nyc_zip_borough_neighborhoods_pop.csv")
+neighborhood_data
+```
+
+Rental Data:
+
+```{r}
+rental_data <- read_csv("data/manhattan-ny_rent_2024_03_15.csv")
+rental_data %<>% left_join(neighborhood_data, by=c("unit_zipcode"="zip"))  %>% filter(borough == "Manhattan") # attach neighborhood data
+rental_data
+```
+
+Sales Data:
+
+```{r}
+sales_data <- read_csv("data/manhattan-ny_sale_2024_03_15.csv")
+#rename some variables
+sales_data$price <- sales_data$unformattedPrice
+sales_data$sqft <- sales_data$area
+sales_data %<>% left_join(neighborhood_data, by=c("addressZipcode"="zip")) %>% filter(borough == "Manhattan")
+sales_data
+```
+
+Annotated Sales Data: (this is data where which we have more than 2 historical sales) 1583/6992 = 0.22, so we have about 22% of the sales properties actively listed
+
+```{r errors=FALSE, messages=FALSE}
+sales_data_annotated <- read_csv("data/manhattan-ny_sale_2024_03_15_with_cagr_and_hoa_fees.csv")
+#rename some variables
+sales_data_annotated$price <- sales_data_annotated$unformattedPrice
+sales_data_annotated$sqft <- sales_data_annotated$area
+sales_data_annotated %<>% left_join(neighborhood_data, by=c("addressZipcode"="zip"))  %>% filter(borough == "Manhattan")
+sales_data_annotated
+```
+
+Add financing information (assuming a 20% downpayment on a 30 year mortgage)
+```{r}
+interest_rate = 0.0772
+downpayment_percent = 0.2
+air12 = interest_rate / 12 #annual interest rate/12
+installments = 12 * 30# assuming a 30-year fixed 
+
+sales_data_annotated %<>% mutate(downpayment = unformattedPrice*downpayment_percent) %>% mutate(monthly_payment = (unformattedPrice-downpayment)*(air12*(1+air12)^installments)/((1+air12)^installments - 1))
+
+sales_data_annotated %<>% mutate(monthly_payment_w_fees = monthly_payment + hoa_fee)
+sales_data_annotated
+```
+
+Add CONDO vs CO-OP
+If you look up online, "D4-ELEVATOR APT", "C6-WALK-UP APARTMENT" buildings are CO-OP buildings while R0-CONDOMINIUMS are CONDO buildings. There are some other weird types in rare cases but they are very few and we want to ignore them for this analysis. 
+```{r}
+sales_data_annotated %<>% filter(building_type %in% c("D4-ELEVATOR APT", "C6-WALK-UP APARTMENT", "R0-CONDOMINIUMS")) %>% mutate(building_type_simple = case_when(
+  building_type %in% c("D4-ELEVATOR APT", "C6-WALK-UP APARTMENT	") ~ "CO-OP",
+  building_type %in% c("R0-CONDOMINIUMS") ~ "CONDO"
+))
+
+sales_data_annotated %<>% filter(building_type_simple %in% c("CO-OP", "CONDO"))
+sales_data_annotated # 1583 - 1368  = 215 (listings removed)
+```
+## Analysis
+
+### Data Exploration
+
+#### Modeling Sales / Rental Price
+I'm not really interested in this, so this won't go very deep, but I thought it would be an interesting to give it a shoot and see what comes out...
+
+
+How beds, bathrooms, sqft, condo vs. co-op and neighborhood affect sales price
+```{r}
+lm_fit <- lm(formula = price ~ beds + baths + neighborhood + sqft + building_type_simple, data = sales_data_annotated)
+summary(lm_fit)
+```
+0.59 R^2....its something, but its not great! 
+Interesting baths is more significant than beds (which I'm certain are correlated, but baths probably conveys more information)
+
+Now lets look at rental data
+```{r}
+rental_data$sqft <- rental_data$area
+lm_fit <- lm(formula = price ~ beds + baths + neighborhood + sqft, data = rental_data)
+summary(lm_fit)
+```
+
+Wow, 0.76 R^2, that's not bad!
+
+We actually have in rental data the "zestimate" which is Zillow's predictions, lets see how correlated this compares against that 
+```{r}
+predicted_values <- predict(lm_fit, newdata = sales_data)
+sales_data$predicted_rent <- predicted_values
+sales_data %>% select(zestimate, predicted_rent) %>% drop_na() %>% cor()
+```
+
+0.55, so not that great! Zillow's estimate is pretty different. I saw some negative values in there too, which is a clear sign of not being in the same range and bad extrapolation! 
+
+#### Listing Distribution
+
+```{r}
+# Tally neighborhoods
+neighborhood_counts_rentals <- data.frame(table(rental_data$neighborhood))
+neighborhood_counts_sales <- data.frame(table(sales_data$neighborhood))
+```
+
+
+Is the subset of data generally representative of the total sales data (is it skewed towards some neighborhoods over others)?
+```{r}
+neighborhood_counts_sales_annotated <- data.frame(table(sales_data_annotated$neighborhood))
+neighborhood_counts_sales_annotated %>% arrange(desc(Freq))
+```
+
+Compare the ratio of frequency for each neighborhood, in a perfectly representative subset, the ratio would be exactly the same for each. Here they're generally between 4-6. I would say the general order is relatively the same and the ratio is pretty consistent, so I think its generally well sampled in terms of neighborhoods. 
+
+```{r}
+neighborhood_counts_sales %>% left_join(neighborhood_counts_sales_annotated, by = c("Var1"="Var1")) %>% mutate(ratio = `Freq.x`/`Freq.y`)
+```
+
+Compare ratio of rental to sales properties by neighborhood
+```{r}
+neighborhood_counts_rentals$num_rental_properties <- neighborhood_counts_rentals$Freq
+neighborhood_counts_rentals$Freq <- NULL
+
+neighborhood_counts_sales$num_sales_properties <- neighborhood_counts_sales$Freq
+neighborhood_counts_sales$Freq <- NULL
+
+neighborhood_counts <- neighborhood_counts_rentals %>% left_join(neighborhood_counts_sales, by = c("Var1"="Var1"))
+neighborhood_counts %<>% mutate(ratio = num_rental_properties/num_sales_properties)
+neighborhood_counts
+```
+
+
+### Renting vs. Buying: Monthly Cost
+Assuming that the buyer is taking out an 80% mortgage, what is the monthly cost of owning an apartment vs. renting one in Manhattan? 
+
+#### All Neighborhoods
+Interestingly rent is higher for studios, then otherwise owning is more expensive.
+```{r message=FALSE, warning=FALSE}
+sales_data_annotated %>% mutate(type = "sale") %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) %>% ggplot(aes(x = type, y = monthly_payment, color = type)) + geom_boxplot(outlier.shape =NA) + geom_jitter(alpha=0.2, size=0.3) + theme_bw() + xlab("Type") + ylab("Monthly Payment ($)") + theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Monthly Payment in Rentals vs. Sales") + scale_y_log10() + facet_wrap(~beds) +
+  geom_signif(comparisons = list(c("rental", "sale")), 
+              map_signif_level = TRUE, 
+              textsize = 3, 
+              tip_length = 0.02, 
+              step_increase = 0.1,
+              y_position = 3)
+```
+
+#### By Neighborhood
+Although interesting overall, neighborhood also plays apart, so we should look at that:
+
+##### Studios
+```{r warning = FALSE}
+sales_data_annotated %>% mutate(type = "sale") %>% filter(beds == 0) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% filter(beds == 0) %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) %>% ggplot(aes(x = type, y = monthly_payment, color = type)) + geom_boxplot(outlier.shape =NA) + geom_jitter(alpha=0.2, size=0.3) + theme_bw() + xlab("Type") + ylab("Monthly Payment ($)") + theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Monthly Payment in Rentals vs. Sales for Studio Apartments") + scale_y_log10() + facet_wrap(~neighborhood) +
+  geom_signif(comparisons = list(c("rental", "sale")), 
+              map_signif_level = TRUE, 
+              textsize = 3, 
+              tip_length = 0.02, 
+              step_increase = 0.1,
+              y_position = 4)
+
+
+sales_data_annotated %>% mutate(type = case_when(
+  building_type_simple == "CONDO" ~ "sale_condo",
+  building_type_simple == "CO-OP" ~ "sale_coop"
+)) %>% filter(beds == 0) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% filter(beds == 0) %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) %>% ggplot(aes(x = type, y = monthly_payment, color = type)) + geom_boxplot(outlier.shape =NA) + geom_jitter(alpha=0.2, size=0.3) + theme_bw() + xlab("Type") + ylab("Monthly Payment ($)") + theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Monthly Payment in Rentals vs. Sales for Studio Apartments") + scale_y_log10() + facet_wrap(~neighborhood) +
+  geom_signif(comparisons = list(c("rental", "sale_condo"), c("rental", "sale_coop")), 
+              map_signif_level = TRUE, 
+              textsize = 3, 
+              tip_length = 0.02, 
+              step_increase = 0.1,
+              y_position = 3)
+
+```
+##### 1 Bedroom
+```{r warning = FALSE}
+sales_data_annotated %>% mutate(type = "sale") %>% filter(beds == 1) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% filter(beds == 1) %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) %>% ggplot(aes(x = type, y = monthly_payment, color = type)) + geom_boxplot(outlier.shape =NA) + geom_jitter(alpha=0.2, size=0.3) + theme_bw() + xlab("Type") + ylab("Monthly Payment ($)") + theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Monthly Payment in Rentals vs. Sales for 1 Bedroom Apartments") + scale_y_log10() + facet_wrap(~neighborhood) +
+  geom_signif(comparisons = list(c("rental", "sale")), 
+              map_signif_level = TRUE, 
+              textsize = 3, 
+              tip_length = 0.02, 
+              step_increase = 0.1,
+              y_position = 4)
+
+
+sales_data_annotated %>% mutate(type = case_when(
+  building_type_simple == "CONDO" ~ "sale_condo",
+  building_type_simple == "CO-OP" ~ "sale_coop"
+)) %>% filter(beds == 1) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% filter(beds == 1) %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) %>% ggplot(aes(x = type, y = monthly_payment, color = type)) + geom_boxplot(outlier.shape =NA) + geom_jitter(alpha=0.2, size=0.3) + theme_bw() + xlab("Type") + ylab("Monthly Payment ($)") + theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Monthly Payment in Rentals vs. Sales for 1 Bedroom Apartments") + scale_y_log10() + facet_wrap(~neighborhood) +
+  geom_signif(comparisons = list(c("rental", "sale_condo"), c("rental", "sale_coop")), 
+              map_signif_level = TRUE, 
+              textsize = 3, 
+              tip_length = 0.02, 
+              step_increase = 0.1,
+              y_position = 3)
+
+```
+##### 2 Bedroom
+
+```{r warning = FALSE}
+sales_data_annotated %>% mutate(type = "sale") %>% filter(beds == 2) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% filter(beds == 2) %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) %>% ggplot(aes(x = type, y = monthly_payment, color = type)) + geom_boxplot(outlier.shape =NA) + geom_jitter(alpha=0.2, size=0.3) + theme_bw() + xlab("Type") + ylab("Monthly Payment ($)") + theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Monthly Payment in Rentals vs. Sales for 2 Bedroom Apartments") + scale_y_log10() + facet_wrap(~neighborhood) +
+  geom_signif(comparisons = list(c("rental", "sale")), 
+              map_signif_level = TRUE, 
+              textsize = 3, 
+              tip_length = 0.02, 
+              step_increase = 0.1,
+              y_position = 4)
+
+
+sales_data_annotated %>% mutate(type = case_when(
+  building_type_simple == "CONDO" ~ "sale_condo",
+  building_type_simple == "CO-OP" ~ "sale_coop"
+)) %>% filter(beds == 2) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% filter(beds == 2) %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) %>% ggplot(aes(x = type, y = monthly_payment, color = type)) + geom_boxplot(outlier.shape =NA) + geom_jitter(alpha=0.2, size=0.3) + theme_bw() + xlab("Type") + ylab("Monthly Payment ($)") + theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Monthly Payment in Rentals vs. Sales for 2 Bedroom Apartments") + scale_y_log10() + facet_wrap(~neighborhood) +
+  geom_signif(comparisons = list(c("rental", "sale_condo"), c("rental", "sale_coop")), 
+              map_signif_level = TRUE, 
+              textsize = 3, 
+              tip_length = 0.02, 
+              step_increase = 0.1,
+              y_position = 3)
+```
+
+##### 3 Bedroom
+
+```{r warning=FALSE}
+sales_data_annotated %>% mutate(type = "sale") %>% filter(beds == 3) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% filter(beds == 3) %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) %>% ggplot(aes(x = type, y = monthly_payment, color = type)) + geom_boxplot(outlier.shape =NA) + geom_jitter(alpha=0.2, size=0.3) + theme_bw() + xlab("Type") + ylab("Monthly Payment ($)") + theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Monthly Payment in Rentals vs. Sales for 3 Bedroom Apartments") + scale_y_log10() + facet_wrap(~neighborhood) +
+  geom_signif(comparisons = list(c("rental", "sale")), 
+              map_signif_level = TRUE, 
+              textsize = 3, 
+              tip_length = 0.02, 
+              step_increase = 0.1,
+              y_position = 4)
+
+
+sales_data_annotated %>% mutate(type = case_when(
+  building_type_simple == "CONDO" ~ "sale_condo",
+  building_type_simple == "CO-OP" ~ "sale_coop"
+)) %>% filter(beds == 3) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% filter(beds == 3) %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) %>% ggplot(aes(x = type, y = monthly_payment, color = type)) + geom_boxplot(outlier.shape =NA) + geom_jitter(alpha=0.2, size=0.3) + theme_bw() + xlab("Type") + ylab("Monthly Payment ($)") + theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Monthly Payment in Rentals vs. Sales for 3 Bedroom Apartments") + scale_y_log10() + facet_wrap(~neighborhood) +
+  geom_signif(comparisons = list(c("rental", "sale_condo"), c("rental", "sale_coop")), 
+              map_signif_level = TRUE, 
+              textsize = 3, 
+              tip_length = 0.02, 
+              step_increase = 0.1,
+              y_position = 3)
+```
+##### 4 Bedroom
+
+```{r warning = FALSE}
+sales_data_annotated %>% mutate(type = "sale") %>% filter(beds == 4) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% filter(beds == 4) %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) %>% ggplot(aes(x = type, y = monthly_payment, color = type)) + geom_boxplot(outlier.shape =NA) + geom_jitter(alpha=0.2, size=0.3) + theme_bw() + xlab("Type") + ylab("Monthly Payment ($)") + theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Monthly Payment in Rentals vs. Sales for 4 Bedroom Apartments") + scale_y_log10() + facet_wrap(~neighborhood) +
+  geom_signif(comparisons = list(c("rental", "sale")), 
+              map_signif_level = TRUE, 
+              textsize = 3, 
+              tip_length = 0.02, 
+              step_increase = 0.1,
+              y_position = 4)
+
+sales_data_annotated %>% mutate(type = case_when(
+  building_type_simple == "CONDO" ~ "sale_condo",
+  building_type_simple == "CO-OP" ~ "sale_coop"
+)) %>% filter(beds == 4) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% filter(beds == 4) %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) %>% ggplot(aes(x = type, y = monthly_payment, color = type)) + geom_boxplot(outlier.shape =NA) + geom_jitter(alpha=0.2, size=0.3) + theme_bw() + xlab("Type") + ylab("Monthly Payment ($)") + theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Monthly Payment in Rentals vs. Sales for 4 Bedroom Apartments") + scale_y_log10() + facet_wrap(~neighborhood) +
+  geom_signif(comparisons = list(c("rental", "sale_condo"), c("rental", "sale_coop")), 
+              map_signif_level = TRUE, 
+              textsize = 3, 
+              tip_length = 0.02, 
+              step_increase = 0.1,
+              y_position = 3)
+```
+
+Generally, it seems that as bedrooms increase, the difference in monthly payment between rentals and sales increase, there also seem to be some strong neighborhood effects. Interestingly, it seems like there isn't a significant difference in overall monthly cost for large swaths of apartments, particularly in the 0 and 1 bedroom ranges. 
+
+#### What % More Expensive is Buying vs. Renting? 
+
+```{r}
+test_data <- sales_data_annotated %>% mutate(type = "sale") %>% filter(beds == 0) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% filter(beds == 0) %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) 
+
+test_data %>% filter(sqft >0 ) %>% mutate(monthly_price_sqft = monthly_payment/sqft) %>% filter(type == "sale") %>% pull(monthly_price_sqft) %>% median() / test_data %>% filter(sqft >0 ) %>% mutate(monthly_price_sqft = monthly_payment/sqft) %>% filter(type == "rental") %>% pull(monthly_price_sqft) %>% median()
+
+```
+
+The average monthly cost of a studio in Manhattan is only 5% higher than a Rental (4% median)
+
+```{r}
+test_data <- sales_data_annotated %>% mutate(type = "sale") %>% filter(beds == 1) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% filter(beds == 1) %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) 
+
+test_data %>% filter(sqft >0 ) %>% mutate(monthly_price_sqft = monthly_payment/sqft) %>% filter(type == "sale") %>% pull(monthly_price_sqft) %>% median() / test_data %>% filter(sqft >0 ) %>% mutate(monthly_price_sqft = monthly_payment/sqft) %>% filter(type == "rental") %>% pull(monthly_price_sqft) %>% median()
+```
+
+10% higher for 1 bedrooms (mean), (8% median)
+
+```{r}
+test_data <- sales_data_annotated %>% mutate(type = "sale") %>% filter(beds == 2) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% filter(beds == 2) %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) 
+
+test_data %>% filter(sqft >0 ) %>% mutate(monthly_price_sqft = monthly_payment/sqft) %>% filter(type == "sale") %>% pull(monthly_price_sqft) %>% median() / test_data %>% filter(sqft >0 ) %>% mutate(monthly_price_sqft = monthly_payment/sqft) %>% filter(type == "rental") %>% pull(monthly_price_sqft) %>% median()
+```
+
+29% higher for 2 bedrooms (29% median)
+
+```{r}
+test_data <- sales_data_annotated %>% mutate(type = "sale") %>% filter(beds == 3) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% filter(beds == 3) %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) 
+
+test_data %>% filter(sqft >0 ) %>% mutate(monthly_price_sqft = monthly_payment/sqft) %>% filter(type == "sale") %>% pull(monthly_price_sqft) %>% median() / test_data %>% filter(sqft >0 ) %>% mutate(monthly_price_sqft = monthly_payment/sqft) %>% filter(type == "rental") %>% pull(monthly_price_sqft) %>% median()
+```
+
+57% for 3 bedrooms (47% median)
+
+```{r}
+test_data <- sales_data_annotated %>% mutate(type = "sale") %>% filter(beds == 4) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type) %>% full_join(rental_data %>% filter(beds == 4) %>% mutate(monthly_payment = price, type = "rental") %>% filter(!is.na(monthly_payment)) %>% select(neighborhood, beds, baths, sqft, monthly_payment, type)) 
+
+test_data %>% filter(sqft >0 ) %>% mutate(monthly_price_sqft = monthly_payment/sqft) %>% filter(type == "sale") %>% pull(monthly_price_sqft) %>% median() / test_data %>% filter(sqft >0 ) %>% mutate(monthly_price_sqft = monthly_payment/sqft) %>% filter(type == "rental") %>% pull(monthly_price_sqft) %>% median()
+```
+
+111% for 4 bedrooms (66% median)
+
+### Buying Condos vs. Co-Ops
+
+#### Are There More Condos or Co-Op Listings?
+There seems to be almost double the amount of condos to co-ops listed in this subset
+```{r}
+building_type_counts <- data.frame(table(sales_data_annotated$building_type_simple))
+building_type_counts
+```
+
+
+
+#### Comparing HOA Fees
+
+Wherever there is data comparing CO-OPs and CONDOs, CO-OPs have much higher HOA fees. 
+```{r warning=FALSE}
+
+# Define a custom y position for the p-value labels
+custom_label_y <- exp(mean(log(sales_data_annotated$hoa_fee), na.rm = TRUE))
+
+# Assuming `sales_data_annotated` is your data frame
+sales_data_annotated %>%
+  filter(beds < 6) %>%
+  ggplot(aes(x = neighborhood, y = hoa_fee, color = building_type_simple)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  theme_bw() + 
+  xlab("Neighborhood") + 
+  ylab("HOA Fees") + 
+  theme(legend.position = "right", 
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
+  ggtitle("HOA Fees by # Beds and Neighborhood") + 
+  scale_y_log10() + 
+  facet_wrap(~beds) 
+```
+
+#### Comparing Price/Sqft
+
+How does the price per squarefoot compare between Co-Ops and Condos? 
+```{r}
+sales_data_annotated %>% filter(sqft > 0) %>% mutate(monthly_payment_per_sqft = price/sqft) %>% ggplot(aes(x = building_type_simple, y = monthly_payment_per_sqft, color = building_type_simple)) + 
+  geom_boxplot(outlier.shape = NA) + 
+  geom_jitter(alpha = 0.2) + 
+  theme_bw() + 
+  xlab("Neighborhood") + 
+  ylab("Price per Sqft") + 
+  theme(legend.position = "right", 
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) + 
+  ggtitle("Price/Sqft of Co-Op vs. Condo") +
+  stat_compare_means(method = "t.test", label = "p.signif", comparisons = list(c("CO-OP", "CONDO")))
+```
+```{r}
+price_per_sqft_data <- sales_data_annotated %>%
+  filter(sqft > 0) %>%
+  mutate(monthly_payment_per_sqft = price / sqft)
+
+# Calculate the mean price per square foot for each building type
+mean_price_per_sqft <- price_per_sqft_data %>%
+  group_by(building_type_simple) %>%
+  summarise(mean_price_per_sqft = mean(monthly_payment_per_sqft, na.rm = TRUE))
+
+mean_price_per_sqft
+```
+1711.269/1109.424 = 1.54 (about 50% more expensive per sqft on average)
+
+```{r}
+sales_data_annotated %>% filter(building_type_simple == "CONDO", neighborhood == "Upper East Side", beds == 1) %>% pull(historical_cagr) %>% median()
+```
+
+
+### Investment Analysis
+
+#### How Do Historic Returns (Broadly) Compare vs. S&P 500?
+
+When I looked it up, I saw the CAGR for the S&P500 is 9.27%, so I'm going to use that as a benchmark to compare against the CAGR for these listings
+```{r warning=FALSE}
+sales_data_annotated %>% ggplot(aes(x = neighborhood, y = historical_cagr, color = building_type_simple)) + geom_boxplot(outlier.shape =NA) + theme_bw() + xlab("Neighborhood") + ylab("Historical CAGR") + theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("All Units") + scale_y_log10() + geom_hline(yintercept = 0.0927, linetype = "dashed", color = "red")
+```
+The baseline historical CAGR for these apartments seems to be below the S&P 500 (but you can actually multiply it using a mortgage, which you can't really do with others)
+
+##### Breakdown by Bedroom & Neighborhood
+
+Facet By Beds (1-4)
+```{r warning=FALSE}
+sales_data_annotated %>% filter(beds < 6) %>% ggplot(aes(x = neighborhood, y = historical_cagr, color = building_type_simple)) + geom_boxplot(outlier.shape =NA)+ theme_bw() + xlab("Neighborhood") + ylab("Historical CAGR") + theme(legend.position = "right", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Historic Returns by # Beds and Neighborhood") + scale_y_log10() + geom_hline(yintercept = 0.0927, linetype = "dashed", color = "red") + facet_wrap(~beds)
+```
+
+
+#### Identifying Ideal Property Types
+Ideally, we want to identify a neighborhood x apartment type that has high historic returns with lower volatility, and many data points so that we have higher confidence in the data
+
+While 4 bedroom condos in Lower Manhattan have the best overall profile (9% median returns with .2% SD, there are only 2 points so its not reliable)
+
+```{r}
+
+# n = 25 is arbitrary 
+sales_data_annotated %>%
+  group_by(beds, building_type_simple, neighborhood) %>% filter(n() > 25) %>%
+  summarise(
+    median_cagr = median(historical_cagr, na.rm = TRUE),
+    std_dev = sd(historical_cagr, na.rm = TRUE),
+    count = n(),
+    ratio = median(historical_cagr, na.rm = TRUE)/sd(historical_cagr, na.rm = TRUE)
+  ) %>% arrange(desc(ratio)) 
+```
+
+1 Bedroom Condos in the upper east side seem to be the best, with ~5% median CAGR with 4% standard deviation and 39 data points. 
+
+
+##### Income / Capital Requirements
+At the lowest end, you'd need an annual income of at least 137151.5 and $99,0000, but you could own a very good apartment. 
+To afford median monthly payment, you'd want $218k annual salary
+
+Minimum:
+```{r }
+listing_data <- sales_data_annotated
+
+# Use the 40X rule to see what minimum income you'd need to afford
+listing_data %>% filter(neighborhood == "Upper East Side", building_type_simple=="CONDO", beds == 1) %>% pull(monthly_payment) %>% min() * 40 # $113,151.5
+
+listing_data %>% filter(neighborhood == "Upper East Side", building_type_simple=="CONDO", beds == 1) %>% pull(downpayment) %>% min() # $99,000
+
+```
+
+Median:
+```{r}
+# Use the 40X rule to see what minimum income you'd need to afford
+listing_data %>% filter(neighborhood == "Upper East Side", building_type_simple=="CONDO", beds == 1) %>% pull(monthly_payment) %>% median() * 40 # $218,302
+
+listing_data %>% filter(neighborhood == "Upper East Side", building_type_simple=="CONDO", beds == 1) %>% pull(downpayment) %>% median()  # $191,000
+
+```
+
+
+#### 5 Year Projections
+We want to see what the equity in the property would be after 5 years, and also what the appreciation on it would be like. To compute this, we use the historical CAGR of the property to project the future value and then calculate the equity built after several years by building an amoritization table for each property. 
+
+```{r}
+listing_data$remaining_balance <- NULL
+listing_data$equity <- NULL
+
+n_years <- 5 # years 
+n_years_in_months <- n_years*12
+listing_data$loan_amount <- listing_data$downpayment / downpayment_percent
+
+# Parameters
+annual_interest_rate <- 0.0772  # 2% annual interest
+compounding_frequency <- 12   # Monthly compounding
+payment_frequency <- 12       # Monthly payments
+loan_term_years <- 30
+
+
+balance_at_target_year <- c()
+for (i in seq(length(listing_data$`Unnamed: 0`))) {
+
+  # Calculate the amortization table for each property
+  amortization_table <- amort.table(
+    Loan = listing_data[i, ] %>% pull(loan_amount),
+    n = loan_term_years * payment_frequency,  # Total number of payments
+    i = annual_interest_rate,
+    ic = compounding_frequency,
+    pf = payment_frequency,
+    plot = FALSE  # Set TRUE if you want to plot payment proportions
+  )
+  
+  # extract the data
+  data.frame(amortization_table$Schedule)[n_years_in_months, ] %>% pull(`Principal.Paid`)
+  
+  balance_at_target_year <- c(balance_at_target_year, data.frame(amortization_table$Schedule)[n_years_in_months, ] %>% pull(`Balance`))
+  
+    
+}
+
+options(scipen = 999)
+
+listing_data$balance_at_target_year <- balance_at_target_year
+listing_data$equity_at_target_year <- listing_data$loan_amount - listing_data$balance_at_target_year + listing_data$downpayment
+listing_data$balance_paid_off_at_target_year <- listing_data$loan_amount - listing_data$balance_at_target_year 
+
+# this is purely appreciation on the initial down payment (not considering equity)
+listing_data$est_roi_on_downpayment <- (listing_data$historical_cagr*n_years*listing_data$unformattedPrice)/listing_data$downpayment
+listing_data$est_roi_vs_benchmark <- (listing_data$est_roi_on_downpayment - 0.0927*n_years)/n_years
+
+listing_data
+```
+
+
+##### Comparing Excess Returns
+We look at all the listings and their historical CAGR to see how well they would perform against the S&P 500, generally most (if financed) would yield a greater ROI on the down payment, but have high volatility
+```{r warning=FALSE}
+# Calculate the IQR and determine bounds for outlier removal
+listing_data_2 <- listing_data %>% filter(beds < 4) %>%
+  group_by(neighborhood, building_type_simple) %>%
+  mutate(Q1 = quantile(est_roi_vs_benchmark, 0.25),
+         Q3 = quantile(est_roi_vs_benchmark, 0.75)) %>%
+  mutate(IQR = Q3 - Q1,
+         Lower_Bound = Q1 - 1.5 * IQR,
+         Upper_Bound = Q3 + 1.5 * IQR) %>%
+  filter(est_roi_vs_benchmark >= Lower_Bound & est_roi_vs_benchmark <= Upper_Bound) %>%
+  ungroup()
+
+# only look at neighborhoods with data > 50 (higher certainty)
+listing_data_2 %<>% group_by(neighborhood) %>% filter(n() > 50)
+
+# Plotting the filtered data without outliers
+ggplot(listing_data_2, aes(x = neighborhood, y = est_roi_vs_benchmark, color = building_type_simple)) +
+  geom_boxplot() +  # Now the boxplot will naturally have no outliers as they were filtered out
+  geom_jitter(alpha = 0.4) +  # Adds a jitter plot to display all data points
+  theme_bw() +  # Applies a minimal theme
+  xlab("Neighborhood") +
+  ylab("Excess CAGR vs. Benchmark") +
+  theme(legend.position = "right", 
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ggtitle("All Units") + geom_hline(yintercept = 0, linetype = "dashed", color = "red") + facet_wrap(~beds) +
+  geom_signif(comparisons = list(c("CO-OP", "CONDO")), 
+              map_signif_level = TRUE, 
+              textsize = 3, 
+              tip_length = 0.02, 
+              step_increase = 0.1,
+              y_position = 0)
+
+```
+
+
+
+#### Sharpe Ratio for our "Ideal" Category
+```{r}
+bed_num <- 1
+
+portfolio_return <- listing_data %>% filter(beds == bed_num) %>% filter(neighborhood == "Upper East Side") %>% pull(historical_cagr) %>% mean()
+risk_free_rate <- 0.035    # current rate for treasury bonds (3.5%) 
+standard_deviation <- listing_data %>% filter(beds == bed_num) %>% filter(neighborhood == "Upper East Side") %>% pull(historical_cagr) %>% sd()  # 12%
+
+# Calculate excess return
+excess_return <- portfolio_return - risk_free_rate
+
+# Calculate Sharpe Ratio (alpha)
+sharpe_ratio <- excess_return / standard_deviation
+
+sharpe_ratio
+```
+
+#### What % of Listings Have Higher Historic Returns than S&P 500 (With a Mortgage)
+```{r}
+listing_data %>% filter(est_roi_vs_benchmark > 0) %>% pull(est_roi_vs_benchmark) %>% length()
+```
+
+```{r}
+listing_data %>% filter(est_roi_vs_benchmark < 0) %>% pull(est_roi_vs_benchmark) %>% length()
+```
+
+After 5 years, 418 did not beat benchmark, 950 did (69% of total)
+
+##### Breakdown by Apt Type
+
+Studio: 71.6%
+1 Bedroom: 70.0%
+2 Bedroom: 72.4%
+3 Bedroom: 61.3%
+4 Bedroom: 59.2%
+```{r}
+bed_num = 4
+listing_data %>% filter(beds == bed_num) %>% filter(est_roi_vs_benchmark > 0) %>% pull(est_roi_vs_benchmark) %>% length() / (listing_data %>% filter(beds == bed_num) %>% pull(est_roi_vs_benchmark)) %>% length()
+
+```
+
+
+#### Are HOA Fees Associated with Returns? 
+
+```{r}
+# Try compare hoa fee with cagr directly (no significant relationship)
+lm_fit <- lm(formula = historical_cagr ~ hoa_fee, data = listing_data)
+summary(lm_fit)
+```
+
+```{r}
+# Try to normalize by taking hoa fee per sqft (no significant linear relationship)
+lm_fit <- lm(formula = historical_cagr ~ hoa_fee_per_sqft, data = listing_data %>% filter(sqft > 0) %>% mutate(hoa_fee_per_sqft = hoa_fee/sqft))
+summary(lm_fit)
+```
+Plot to visually inspect 
+```{r warning=FALSE}
+listing_data %>% ggplot(aes(x = hoa_fee, y = historical_cagr)) + geom_point() + theme_bw() + scale_y_log10() + scale_x_log10() + geom_smooth()
+```
+
+
+
