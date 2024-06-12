@@ -18,6 +18,7 @@ To answer the questions I wrote the ```zillow_scraper``` package to download and
 
 - Looked at 6.2k rental listings and 6.9k sale listings collected in March 2024, narrowed down sale listings to 1.5k listings with historical sale data to get information on historical annualized returns
 - Co-ops have higher HOA fees than condos (so less of your monthly cost will go to building equity), but are more affordable overall (the cost per sqft of condos is ~50% higher on average)
+   - Although you might expect higher HOA fees might be associated with lower returns (since you'd ideally want to purchase property with less maintenance cost all else being equal), there was no significant association between returns and HOA fees in the data collected. 
 - Interestingly, the monthly cost of renting is not significantly higher than buying a co-op w/ a mortgage (in fact it is actually higher in some neighborhood - bedroom combinations), the monthly cost of a condo w/ a mortgage is typically significantly more expensive than renting
    - However, rentals do have more space per monthly cost than co-ops
 - Historical annualized returns (CAGR) for owning Manhattan apartments (co-op and condos) is lower than S&P 500 and can have high volatility depending on # beds and neighborhood (however: if you take out a mortgage, your ROI on the mortgage is generally higher than S&P 500, but subject to higher volatility)
