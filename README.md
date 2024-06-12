@@ -24,6 +24,9 @@ To answer the questions I wrote the ```zillow_scraper``` package to download and
 - The group of properties that seem to have the best ratio of returns to volatility are 1 bedroom condos on the Upper East Side (median of 5% annualized return, with 4% SD, n = 39 observations) if you take a 80% mortgage out, your returns on your downpayment is essentially multiplied by 5x - so you'd have 25% annualized return with 20% SD vs 9.27% annualized return and 18.57% SD from S&P 500 from 1871 to 2023 (this is purely looking at ROI on downpayment, excluding equity, rent, monthly payments, etc.)
    - For the cheapest listing in this class, you'd need at least a $137k annual income and $99k for a downpayment (not including fees and taxes) - in comparison to afford a median listing (so you can afford the bottom 50% of listings), you'd need at least a $218k annual income and $191k for a downpayment
 
+![Screenshot of the application](screenshot_figure.png)
+
+
 ## Contents
 - ```data/ ``` - contains all data that was collected and annotated for this analysis. 
 - ```download_and_process_data.ipynb``` - code that was used to download, annotate (HOA fees, building type, historic sales data, etc.) and pre-process data (calculate average historical returns)
